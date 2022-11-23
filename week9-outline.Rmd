@@ -96,10 +96,11 @@ SB_county_south <- st_read(here("data", "SB_county_south.shp"))
 #reprojecting using a crs to match the crs of the landsat image (now it should be in WGS 84 UTM 11)
 SB_county_south <- st_transform(SB_county_south, crs = crs(landsat_20070925))
 
+#cropping the landsat image to the extent of the shape file (here there is still a rectangle around it and for each of those pixels there is still a value of NA)
 #cropping the landsat scene using the SB_county_south as the cropping image, crop it down to the same extent (get rid of any rows or columns that we don't need)
 landsat_cropped <- crop(landsat_20070925, SB_county_south)
 
-#masking (mask changes the values within the pixels (?))
+#masking (mask takes the rectangle and removes all the pixels we don't want so we just mask for the exact pixels that we want within the mask)
 landsat_masked <- mask(landsat_cropped, SB_county_south)
 
 #look at the output by using the plot RGB
@@ -113,7 +114,26 @@ Now we need to convert the values in our raster stack to correspond to reflectan
 In this case, we are working with [Landsat Collection 2](https://www.usgs.gov/landsat-missions/landsat-collection-2). The valid range of pixel values for this collection 7,273-43,636, with a multiplicative scale factor of 0.0000275 and an additive scale factor of -0.2. So we reclassify any erroneous values as `NA` and update the values for each pixel based on the scaling factors. Now the pixel values should range from 0-100%.
 
 ```{r include=TRUE}
+#correct range of values for landsat 5 are 7273 - 43626, we want to replace any values which fall outside of this with NAs
 
+#Defining a matrix to replace bad values to NA
+#Creating a reclassification matrix so negative infinity to 7273 --> set these to NA, from anything between 43636 to infinity --> set these to NA
+rcl <- matrix(c(-Inf, 7273, NA,
+                43636, Inf, NA),
+              ncol = 3, byrow = TRUE)
+
+#Reclassifying our raster using the reclassification matrix that we created above
+landsat <- classify(landsat_masked, rcl = rcl)
+
+#converting to reflectance based on known scale factors
+# scale factor for landsat 5
+# multiply by 0.0000275
+# add by -0.2
+#this will convert the negative values into reflectance 
+landsat <- (landsat * 0.0000275 - 0.2) * 100
+
+#plotting to check the output
+plotRGB(landsat, r = 3, g = 2, b = 1, stretch = "lin")
 ```
 
 
@@ -123,6 +143,20 @@ In this case, we are working with [Landsat Collection 2](https://www.usgs.gov/la
 We will load the shapefile identifying different locations within our study area as containing one of our 4 land cover types. We can then extract the spectral values at each site to create a data frame that relates land cover types to their spectral reflectance.
 
 ```{r include=TRUE}
+training_data <- st_read("./data/trainingdata.shp") %>% 
+  st_transform(., crs = crs(landsat))
+
+#pulling out the reflectance for the pixels within each polygon
+training_data_values <- extract(landsat, training_data, df = TRUE)
+
+#creating data frame from sf object by dropping geom
+training_data_attributes <- training_data %>% 
+  st_drop_geometry()
+
+#joining spectral reflectance values onto it (wanting to add landcover type to these IDs) Adding training data attributes to the training data values, and joining by IDs (they are different in terms of upper case vs lowercase)
+SB_training_data <- left_join(training_data_values, training_data_attributes, 
+                              by = c("ID" = "id")) %>% 
+  mutate(type = as.factor(type)) #converting land cover type to factor
 
 ```
 
@@ -132,6 +166,9 @@ To train our decision tree, we first need to establish our model formula (i.e. w
 To understand how our decision tree will classify pixels, we can plot the results. The decision tree is comprised of a hierarchy of binary decisions. Each decision rule has 2 outcomes based on a conditional statement pertaining to values in each spectral band.   
 
 ```{r include=TRUE}
+#estblish model formula
+#We want to predict type based on the independent variables on the right (red, gree, blue, etc.)
+SB_formula <- type ~ red + green + blue + NIR + SWIR1 + SWIR2
 
 ```
 
@@ -139,13 +176,34 @@ To understand how our decision tree will classify pixels, we can plot the result
 Now that we have created our decision tree, we can apply it to our entire image. The `terra` package includes a `predict()` function that allows us to apply a model to our data. In order for this to work properly, the names of the layers need to match the column names of the predictors we used to train our decision tree. The `predict()` function will return a raster layer with integer values. These integer values correspond to the *factor levels* in the training data. To figure out what category each integer corresponds to, we can inspect the levels of our training data. 
 
 ```{r include=TRUE}
+#training a decision tree classifier
+SB_decision_tree <- rpart(formula = SB_formula,
+                          data = SB_training_data,
+                          method = "class",
+                          na.action = na.omit) #omit any situation where there is NAs
 
+#visualizing decision tree classifier
+#plotted our trained decision tree
+prp(SB_decision_tree)
+
+SB_classification <- predict(landsat, SB_decision_tree,
+                             type = "class", na.rm = TRUE)
+
+#SB_classification is now a raster
+#there is only one layer and that is our landcover map (our min to max values are from 1-4, each of those integers correspond to the factors for each of the land cover types. For example green vegetation was number 1, etc. )
+SB_classification
 
 ```
 
 #### Plot results
 Now we can plot the results and check out our land cover map!
 ```{r}
-
+tm_shape(SB_classification) +
+  tm_raster(style = "cat", #it is categorical
+            labels = c("green_vegetation", #reestablishing labels to reflect landcover type
+                       "soil/dead grass",
+                       "urban",
+                       "water"),
+            title = "land cover")
 
 ```
