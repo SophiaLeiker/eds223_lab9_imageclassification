@@ -132,7 +132,7 @@ landsat <- classify(landsat_masked, rcl = rcl)
 #this will convert the negative values into reflectance 
 landsat <- (landsat * 0.0000275 - 0.2) * 100
 
-#plotting to check the output
+#plotting to check the output 
 plotRGB(landsat, r = 3, g = 2, b = 1, stretch = "lin")
 ```
 
